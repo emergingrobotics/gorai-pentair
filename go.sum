@@ -2,6 +2,8 @@ github.com/antithesishq/antithesis-sdk-go v0.7.2-default-no-op h1:p2zFsAzvhIpFya
 github.com/antithesishq/antithesis-sdk-go v0.7.2-default-no-op/go.mod h1:FQyySiasQQM8735Ddel3MRojmy4dA1IqCeyJ5jmPMbI=
 github.com/coder/websocket v1.8.15 h1:6B2JPeOGlpff2Uz6vOEH1Vzpi0iUz20A+lPVhPHtNUA=
 github.com/coder/websocket v1.8.15/go.mod h1:NX3SzP+inril6yawo5CQXx8+fk145lPDC6pumgx0mVg=
+github.com/emergingrobotics/gopentair v0.0.0-20261126214759-1e8829665ccf h1:tDkhY23bEAwJDapOHDG3+XpWYHTx7yDN2EsWrdDas4I=
+github.com/emergingrobotics/gopentair v0.0.0-20261126214759-1e8829665ccf/go.mod h1:sLdXWqMxMIrx2M+vcsHyujvhfvc8w9Huep9dNDfmpaM=
 github.com/emergingrobotics/gorai v0.2.4 h1:xi5MO06ti5C+e9L388MAzBhKbVYQcD9t5WswS6EP6Ag=
 github.com/emergingrobotics/gorai v0.2.4/go.mod h1:ISwWpIxsaHdhEK6kOlJ9/Ejx0ZmjOOLq2DPOt5rz9YY=
 github.com/google/go-tpm v0.9.8 h1:slArAR9Ft+1ybZu0lBwpSmpwhRXaa85hWtMinMyRAWo=

@@ -147,13 +147,17 @@ refresh. Commands are not exposed on NATS by the standalone binary.
 
 ## Local development
 
+The SDK (`github.com/emergingrobotics/gopentair`) is an ordinary go.mod dependency, so this
+repo builds standalone. To work on the SDK and this component together, use the
+[gorai-all](https://github.com/emergingrobotics/gorai-all) workspace, whose `go.work`
+pulls in the local checkouts:
+
 ```
-er/
-  gopentair/               # github.com/emergingrobotics/gopentair (replace in go.mod)
-  gorai-all/
-    go.work                # includes ./gorai-pentair
-    gorai/
-    gorai-pentair/         # this repo
+gorai-all/
+  go.work                  # uses ./gorai, ./gopentair, ./gorai-pentair, ...
+  gorai/
+  gopentair/               # github.com/emergingrobotics/gopentair
+  gorai-pentair/           # this repo
 ```
 
 ```bash

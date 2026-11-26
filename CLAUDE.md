@@ -1,8 +1,8 @@
 # gorai-pentair
 
 Gorai satellite component: a Pentair IntelliFlo 3 (IF31) pool pump as a
-`sensor/pentair-pump` component, built on the gopentair SDK (`../../gopentair`, module
-path `github.com/emergingrobotics/gopentair`, pulled in by a `replace` in go.mod). Same
+`sensor/pentair-pump` component, built on the gopentair SDK (`github.com/emergingrobotics/gopentair`,
+a normal go.mod dependency; for local SDK work, gorai-all's go.work uses `./gopentair`). Same
 pattern as `../gorai-aquatemp`. See VISION.md for the design and README.md for
 subjects, payload and commands.
 
