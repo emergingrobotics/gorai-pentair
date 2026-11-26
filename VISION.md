@@ -2,8 +2,8 @@
 
 A gorai satellite component that puts a **Pentair IntelliFlo 3 (IF31) variable-speed
 pool pump** on the gorai NATS mesh. It is the pump-only sibling of
-[`gorai-aquatemp`](../gorai-aquatemp): same shape, same subjects, same rules, built on
-[`gopentair`](../../gopentair) instead of goaquatemp.
+[`gorai-aquatemp`](https://github.com/emergingrobotics/gorai-aquatemp): same shape, same subjects, same rules, built on
+[`gopentair`](https://github.com/emergingrobotics/gopentair) instead of goaquatemp.
 
 ## Why
 
@@ -17,7 +17,7 @@ call for heat unless the pump is running a program that moves at least N GPM".
 
 | | gorai-aquatemp | gorai-pentair |
 |---|---|---|
-| SDK | goaquatemp (`replace => ../../goaquatemp`) | gopentair (`replace => ../../gopentair`) |
+| SDK | `github.com/emergingrobotics/goaquatemp` | `github.com/emergingrobotics/gopentair` |
 | Registry | `sensor` / `aquatemp` | `sensor` / `pentair-pump` |
 | Default name | `heat-pump` | `pool-pump` |
 | Package | `heatpump/` | `pump/` |
@@ -157,7 +157,8 @@ test asserting the raw device ID never reaches a published payload.
 Status as of 2026-11-26: milestones 1–3 and the code half of 4 are implemented and
 tested against a fake client. What remains needs a real pump.
 
-1. **Scaffold, read-only.** ✅ go.mod with `replace` to `../../gopentair`,
+1. **Scaffold, read-only.** ✅ go.mod depending on gopentair (first via a local
+   `replace`, now the published module),
    `./gorai-pentair` in `go.work`, Makefile, REST `State` poll and `Readings()`.
 2. **Push.** ✅ `Watch`-driven publishing with de-duplication, coalescing and the poll
    heartbeat, plus the `source_*`, `run_change`, `program_change` and `alarm` events.

@@ -5,7 +5,21 @@ Pentair **IntelliFlo 3 (IF31)** variable-speed pool pump on the gorai NATS mesh.
 wraps [gopentair](https://github.com/emergingrobotics/gopentair), follows the pump
 through the Pentair Home cloud (WebSocket push plus a REST poll), and publishes its
 state as a standard `sensor/pentair-pump` component. It is the pump-only sibling of
-[gorai-aquatemp](../gorai-aquatemp). See [VISION.md](VISION.md) for the design.
+[gorai-aquatemp](https://github.com/emergingrobotics/gorai-aquatemp). See [VISION.md](VISION.md) for the design.
+
+## Install
+
+```bash
+# Embed the component in a robot binary
+go get github.com/emergingrobotics/gorai-pentair@latest
+
+# Standalone publisher, and a subscriber that pretty-prints what it publishes
+go install github.com/emergingrobotics/gorai-pentair/cmd/gorai-pentair@latest
+go install github.com/emergingrobotics/gorai-pentair/cmd/pentair-watch@latest
+```
+
+Releases are tagged `vX.Y.Z`; see the
+[releases page](https://github.com/emergingrobotics/gorai-pentair/releases) for what each version pins.
 
 ## Quick start: publish to a NATS bus on this host
 
