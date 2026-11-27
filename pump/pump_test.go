@@ -35,6 +35,7 @@ type fakeClient struct {
 	watchErr error
 	watchCh  chan gopentair.Event
 	logouts  int
+	logins   int
 }
 
 func newFake() *fakeClient {
@@ -79,7 +80,12 @@ func (f *fakeClient) snapshot() gopentair.DeviceState {
 	return f.stateLocked()
 }
 
-func (f *fakeClient) Login(context.Context) error      { return f.loginErr }
+func (f *fakeClient) Login(context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.logins++
+	return f.loginErr
+}
 func (f *fakeClient) ForceLogin(context.Context) error { return f.loginErr }
 func (f *fakeClient) Logout(context.Context, bool) error {
 	f.mu.Lock()
@@ -322,7 +328,9 @@ func newTest(t *testing.T, fc *fakeClient, nc *nats.Conn, mod ...func(registry.C
 		t.Fatal(err)
 	}
 	c := &clock{t: time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)}
-	return newPump(conf, cfg, fc, dev, nc, c.now), c
+	p := newPump(conf, cfg, fc, dev, nc, c.now)
+	p.connected = true
+	return p, c
 }
 
 // --- tests ---
@@ -891,6 +899,106 @@ func TestNewAndCloseKeepSession(t *testing.T) {
 	}
 	if _, err := New(context.Background(), nil, registry.Config{"password": "p"}); err == nil {
 		t.Fatal("want config error")
+	}
+}
+
+func fastBackoff(t *testing.T) {
+	t.Helper()
+	oldMin, oldMax := connectBackoffMin, connectBackoffMax
+	connectBackoffMin, connectBackoffMax = 10*time.Millisecond, 40*time.Millisecond
+	t.Cleanup(func() { connectBackoffMin, connectBackoffMax = oldMin, oldMax })
+}
+
+func useFake(t *testing.T, fc *fakeClient) {
+	t.Helper()
+	old := clientFactory
+	clientFactory = func(*Config, *slog.Logger) (gopentair.Client, error) { return fc, nil }
+	t.Cleanup(func() { clientFactory = old })
+}
+
+// The cloud being unreachable at startup must not fail New: the component
+// reports source_down/connect_failed, retries, and starts publishing once the
+// cloud answers.
+func TestNewSucceedsWhileCloudIsDownAndConnectsLater(t *testing.T) {
+	fastBackoff(t)
+	nc := startNATS(t)
+	data := subscribe(t, nc, "gorai.home.pool-pump.data")
+	events := subscribe(t, nc, "gorai.home.pool-pump.event")
+	fc := newFake()
+	fc.loginErr = errors.New("dial tcp: connection refused")
+	useFake(t, fc)
+
+	comp, err := New(context.Background(), natsDeps{nc}, baseConf())
+	if err != nil {
+		t.Fatalf("New failed while the cloud was down: %v", err)
+	}
+	p := comp.(*Pump)
+	defer p.Close(context.Background())
+
+	ev := recv(t, events)
+	if ev["kind"] != EventSourceDown || ev["reason"] != ReasonConnectFailed {
+		t.Fatalf("event = %v, want source_down/connect_failed", ev)
+	}
+	if _, ok := ev["device_ref"]; ok {
+		t.Errorf("device_ref published before the pump was resolved: %v", ev)
+	}
+	if p.DeviceRef() != "" {
+		t.Errorf("DeviceRef = %q before connecting", p.DeviceRef())
+	}
+	if _, err := p.Readings(context.Background()); err == nil {
+		t.Error("Readings succeeded before connecting")
+	}
+	if _, err := p.DoCommand(context.Background(), map[string]any{"command": "stop"}); err == nil {
+		t.Error("stop succeeded before connecting")
+	}
+
+	fc.mu.Lock()
+	fc.loginErr = nil
+	fc.mu.Unlock()
+	if d := recv(t, data); d["device_ref"] != DeviceRef(pumpID) {
+		t.Errorf("data after connecting = %v", d)
+	}
+	if ev := recv(t, events); ev["kind"] != EventSourceUp {
+		t.Errorf("event = %v, want source_up", ev)
+	}
+	if p.DeviceRef() != DeviceRef(pumpID) {
+		t.Errorf("DeviceRef = %q after connecting", p.DeviceRef())
+	}
+}
+
+// A rejected login is reported once as reauth_required and never retried.
+func TestRejectedLoginIsNotRetried(t *testing.T) {
+	fastBackoff(t)
+	nc := startNATS(t)
+	events := subscribe(t, nc, "gorai.home.pool-pump.event")
+	fc := newFake()
+	fc.loginErr = fmt.Errorf("srp: %w", gopentair.ErrInvalidCredentials)
+	useFake(t, fc)
+
+	comp, err := New(context.Background(), natsDeps{nc}, baseConf())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer comp.(*Pump).Close(context.Background())
+
+	if ev := recv(t, events); ev["reason"] != ReasonReauthRequired {
+		t.Fatalf("event = %v, want source_down/reauth_required", ev)
+	}
+	time.Sleep(150 * time.Millisecond) // several backoff periods
+	fc.mu.Lock()
+	logins := fc.logins
+	fc.mu.Unlock()
+	if logins != 1 {
+		t.Errorf("Login called %d times, want 1", logins)
+	}
+}
+
+func TestNewConnectedFailsFast(t *testing.T) {
+	fc := newFake()
+	fc.loginErr = gopentair.ErrReauthRequired
+	useFake(t, fc)
+	if _, err := NewConnected(context.Background(), nil, baseConf()); !errors.Is(err, gopentair.ErrReauthRequired) {
+		t.Fatalf("err = %v, want ErrReauthRequired (the CLI prompts for a password on it)", err)
 	}
 }
 

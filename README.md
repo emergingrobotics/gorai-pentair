@@ -125,6 +125,7 @@ scale and units are confirmed. The raw device ID is never published or logged.
 ### `gorai.<robot_id>.<name>.event`
 
 ```json
+{"ts":"...","kind":"source_down","reason":"connect_failed"}
 {"ts":"...","device_ref":"3f9a1c0b72de","kind":"source_down","reason":"api_error"}
 {"ts":"...","device_ref":"3f9a1c0b72de","kind":"source_down","reason":"device_offline"}
 {"ts":"...","device_ref":"3f9a1c0b72de","kind":"source_down","reason":"reauth_required"}
@@ -134,8 +135,14 @@ scale and units are confirmed. The raw device ID is never published or logged.
 {"ts":"...","device_ref":"3f9a1c0b72de","kind":"alarm","raised":true,"alarm_bits":4}
 ```
 
+- `connect_failed`: login or pump lookup failed at startup for a reason that may pass
+  (network, Pentair cloud outage). Login runs in the background, so this never stops the
+  robot that embeds the component: it retries with backoff (30s, doubling to 10m) and
+  publishes `source_up` once it is polling. Until then there is no `device_ref`, and
+  `Readings()` and DoCommand (except `get_config`) return an error.
 - `api_error` fires after 3 consecutive failed polls.
-- `reauth_required` means the saved login is dead. It is published once and the
+- `reauth_required` means the saved login is dead, or Pentair rejected the username/password
+  at startup. It is published once and the
   component stops polling and watching until it is reconfigured or restarted.
 - `run_change` carries the program on a start; `program_change` covers a switch
   between programs while running (and a program number that arrives after the start).

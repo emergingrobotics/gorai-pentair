@@ -15,6 +15,11 @@
 // scale or units are unverified (pressure, remaining time, program schedule
 // fields) are not published. The raw device ID is never published or logged;
 // the pump is identified by device_ref, a short one-way hash of it.
+//
+// Login and pump lookup happen in the background, so an unreachable Pentair
+// cloud at startup never stops the robot: the component retries with backoff
+// (source_down / connect_failed) and starts publishing once it connects. A
+// rejected login is not retried (source_down / reauth_required).
 package pump
 
 import (
@@ -62,6 +67,15 @@ const (
 	ReasonAPIError       = "api_error"
 	ReasonDeviceOffline  = "device_offline"
 	ReasonReauthRequired = "reauth_required"
+	// ReasonConnectFailed: login or pump lookup failed for a reason that may
+	// pass (network, cloud outage). The component keeps retrying with backoff.
+	ReasonConnectFailed = "connect_failed"
+)
+
+// Connection retry backoff. Variables so tests can shorten them.
+var (
+	connectBackoffMin = 30 * time.Second
+	connectBackoffMax = 10 * time.Minute
 )
 
 func init() {
@@ -93,11 +107,12 @@ type Pump struct {
 	logger *slog.Logger
 	now    func() time.Time
 
-	mu         sync.RWMutex // guards config, client, device, ref, readings, lastUpdate, pollErr
+	mu         sync.RWMutex // guards config, client, device, ref, connected, readings, lastUpdate, pollErr
 	config     *Config
 	client     gopentair.Client
 	device     gopentair.Device
 	ref        string
+	connected  bool // login and pump lookup succeeded
 	readings   map[string]any
 	lastUpdate time.Time
 	pollErr    error
@@ -149,16 +164,36 @@ var clientFactory = func(cfg *Config, logger *slog.Logger) (gopentair.Client, er
 	return gopentair.NewClient(opts...)
 }
 
-// New creates the component, logs in, resolves the pump and starts
-// watching and polling.
+// New validates the config, creates the component and starts connecting in
+// the background. It fails only for invalid configuration, never because the
+// Pentair cloud is unreachable or the login is rejected; those are reported as
+// source_down events.
 func New(ctx context.Context, deps registry.Dependencies, conf registry.Config) (any, error) {
 	cfg, err := parseConfig(conf)
 	if err != nil {
 		return nil, fmt.Errorf("invalid config: %w", err)
 	}
-	logger := componentLogger(conf)
+	client, err := clientFactory(cfg, componentLogger(conf))
+	if err != nil {
+		return nil, fmt.Errorf("creating pentair client: %w", err)
+	}
+	p := newPump(conf, cfg, client, gopentair.Device{}, natsFrom(deps), time.Now)
+	p.logPublishing()
+	p.startConnecting(ctx)
+	return p, nil
+}
 
-	client, err := clientFactory(cfg, logger)
+// NewConnected is New for programs that want to fail fast, such as the
+// standalone gorai-pentair binary (which prompts for a password on
+// ErrReauthRequired): it logs in and resolves the pump before returning, and
+// returns that error instead of retrying. Robots should use New via the
+// registry.
+func NewConnected(ctx context.Context, deps registry.Dependencies, conf registry.Config) (*Pump, error) {
+	cfg, err := parseConfig(conf)
+	if err != nil {
+		return nil, fmt.Errorf("invalid config: %w", err)
+	}
+	client, err := clientFactory(cfg, componentLogger(conf))
 	if err != nil {
 		return nil, fmt.Errorf("creating pentair client: %w", err)
 	}
@@ -166,22 +201,31 @@ func New(ctx context.Context, deps registry.Dependencies, conf registry.Config) 
 	if err != nil {
 		return nil, err
 	}
+	p := newPump(conf, cfg, client, dev, natsFrom(deps), time.Now)
+	p.connected = true
+	p.logPublishing()
+	p.start(ctx)
+	return p, nil
+}
 
-	var nc *nats.Conn
-	if deps != nil {
-		if v, err := deps.Get("nats"); err == nil {
-			nc, _ = v.(*nats.Conn)
-		}
+func natsFrom(deps registry.Dependencies) *nats.Conn {
+	if deps == nil {
+		return nil
 	}
+	v, err := deps.Get("nats")
+	if err != nil {
+		return nil
+	}
+	nc, _ := v.(*nats.Conn)
+	return nc
+}
 
-	p := newPump(conf, cfg, client, dev, nc, time.Now)
-	if nc != nil {
-		p.logger.Info("NATS publishing enabled", "topic", p.topic, "event_topic", p.eventTopic, "device_ref", p.ref)
+func (p *Pump) logPublishing() {
+	if p.natsConn != nil {
+		p.logger.Info("NATS publishing enabled", "topic", p.topic, "event_topic", p.eventTopic)
 	} else {
 		p.logger.Warn("NATS connection not available, data will not be published")
 	}
-	p.start(ctx)
-	return p, nil
 }
 
 func componentName(conf registry.Config) string {
@@ -213,7 +257,7 @@ func newPump(conf registry.Config, cfg *Config, client gopentair.Client, dev gop
 		config:     cfg,
 		client:     client,
 		device:     dev,
-		ref:        DeviceRef(dev.ID),
+		ref:        refOf(dev),
 		natsConn:   nc,
 		topic:      fmt.Sprintf("gorai.%s.%s.data", robotID, name),
 		eventTopic: fmt.Sprintf("gorai.%s.%s.event", robotID, name),
@@ -312,10 +356,102 @@ func resolveDevice(ctx context.Context, client gopentair.Client, ref string) (go
 	return *d, nil
 }
 
+// refOf is the device_ref of a resolved device, or "" before resolution.
+func refOf(dev gopentair.Device) string {
+	if dev.ID == "" {
+		return ""
+	}
+	return DeviceRef(dev.ID)
+}
+
+// startConnecting logs in and resolves the pump in the background, then runs
+// the poll and watch loops.
+func (p *Pump) startConnecting(parent context.Context) {
+	ctx, cancel := context.WithCancel(parent)
+	p.cancel = cancel
+	p.wg.Add(1)
+	go func() {
+		defer p.wg.Done()
+		if p.connect(ctx) {
+			p.launch(ctx)
+		}
+	}()
+}
+
+// connect retries login and pump lookup until it succeeds, the login is
+// rejected, or ctx ends. It reports whether the component is connected.
+func (p *Pump) connect(ctx context.Context) bool {
+	backoff := connectBackoffMin
+	for {
+		p.mu.RLock()
+		client, ref := p.client, p.config.Device
+		p.mu.RUnlock()
+
+		dev, err := resolveDevice(ctx, client, ref)
+		if err == nil {
+			p.mu.Lock()
+			p.device, p.ref, p.connected, p.pollErr = dev, refOf(dev), true, nil
+			p.mu.Unlock()
+			p.logger.Info("connected to Pentair Home", "device_ref", refOf(dev))
+			return true
+		}
+		if ctx.Err() != nil {
+			return false
+		}
+		p.mu.Lock()
+		p.pollErr = err
+		p.mu.Unlock()
+
+		if isAuthFailure(err) {
+			// A human has to log in again; don't hammer Cognito.
+			p.logger.Error("Pentair rejected the login; not retrying until reconfigured or restarted", "error", err)
+			p.ingestMu.Lock()
+			p.authFailed = true
+			p.ingestMu.Unlock()
+			p.markDown(ReasonReauthRequired)
+			return false
+		}
+		p.logger.Warn("cannot connect to Pentair Home yet, retrying", "error", err, "in", backoff.String())
+		p.markDown(ReasonConnectFailed)
+		if !sleepCtx(ctx, backoff) {
+			return false
+		}
+		backoff = min(backoff*2, connectBackoffMax)
+	}
+}
+
+// markDown publishes source_down with reason once, when the reason changes.
+// The error itself is only logged (through gopentair's redacting handler).
+func (p *Pump) markDown(reason string) {
+	p.ingestMu.Lock()
+	defer p.ingestMu.Unlock()
+	if p.downReason == reason {
+		return
+	}
+	p.downReason = reason
+	p.mu.RLock()
+	ref := p.ref
+	p.mu.RUnlock()
+	ev := map[string]any{
+		"ts":     p.now().UTC().Format(time.RFC3339),
+		"kind":   EventSourceDown,
+		"reason": reason,
+	}
+	if ref != "" {
+		ev["device_ref"] = ref
+	}
+	p.publish(p.eventTopic, ev)
+}
+
 func (p *Pump) start(parent context.Context) {
 	ctx, cancel := context.WithCancel(parent)
 	p.cancel = cancel
+	p.launch(ctx)
+}
 
+// launch starts the poll loop and, if enabled, the watch loop. The pump must
+// already be resolved.
+func (p *Pump) launch(ctx context.Context) {
 	p.mu.RLock()
 	cfg := p.config
 	p.mu.RUnlock()
@@ -743,7 +879,7 @@ func (p *Pump) Readings(ctx context.Context) (map[string]any, error) {
 	defer p.mu.RUnlock()
 	if p.readings == nil {
 		if p.pollErr != nil {
-			return nil, fmt.Errorf("no readings available, last poll error: %w", p.pollErr)
+			return nil, fmt.Errorf("no readings available, last error: %w", p.pollErr)
 		}
 		return nil, errors.New("no readings available yet")
 	}
@@ -778,7 +914,7 @@ func (p *Pump) Reconfigure(ctx context.Context, deps resource.Dependencies, conf
 		p.lastRunning, p.lastAlarm, p.lastProgram = nil, nil, 0
 		p.lastPublished = nil
 	}
-	p.config, p.client, p.device, p.ref = cfg, client, dev, DeviceRef(dev.ID)
+	p.config, p.client, p.device, p.ref, p.connected = cfg, client, dev, refOf(dev), true
 	p.pollErr = nil
 	p.errCount = 0
 	p.authFailed = false
@@ -804,10 +940,13 @@ func (p *Pump) Reconfigure(ctx context.Context, deps resource.Dependencies, conf
 // against the device state, and never retried after an ambiguous failure.
 func (p *Pump) DoCommand(ctx context.Context, cmd map[string]any) (map[string]any, error) {
 	p.mu.RLock()
-	cfg, client, id, ref := p.config, p.client, p.device.ID, p.ref
+	cfg, client, id, ref, connected, lastErr := p.config, p.client, p.device.ID, p.ref, p.connected, p.pollErr
 	p.mu.RUnlock()
 
 	name, _ := cmd["command"].(string)
+	if !connected && name != "get_config" {
+		return nil, fmt.Errorf("not connected to Pentair Home yet (last error: %v)", lastErr)
+	}
 	dryRun, _ := cmd["dry_run"].(bool)
 	pump := gopentair.NewPump(client, id)
 

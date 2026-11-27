@@ -152,7 +152,7 @@ func main() {
 // session it asks for the password on the terminal (when there is one) and
 // tries once more; the session it gets is cached for the next start.
 func newPump(ctx context.Context, deps registry.Dependencies, conf registry.Config) (*pump.Pump, error) {
-	comp, err := pump.New(ctx, deps, conf)
+	comp, err := pump.NewConnected(ctx, deps, conf)
 	if err != nil && conf["password"] == "" && errors.Is(err, gopentair.ErrReauthRequired) {
 		if !term.IsTerminal(int(os.Stdin.Fd())) {
 			return nil, fmt.Errorf("%w: set PENTAIR_PASSWORD (or --password), or run once on a terminal to be prompted", err)
@@ -164,12 +164,12 @@ func newPump(ctx context.Context, deps registry.Dependencies, conf registry.Conf
 			return nil, fmt.Errorf("reading password: %w", rerr)
 		}
 		conf["password"] = string(pw)
-		comp, err = pump.New(ctx, deps, conf)
+		comp, err = pump.NewConnected(ctx, deps, conf)
 	}
 	if err != nil {
 		return nil, err
 	}
-	return comp.(*pump.Pump), nil
+	return comp, nil
 }
 
 // runOnce builds the component without NATS, runs one command and prints
